@@ -182,14 +182,21 @@ class CCSegmentsReader(Iterable[dict]):
         return self._segments
 
     def open_segment(self, segment: str) -> Iterable[str]:
-        url = self.segment_url(segment)
-        file: Optional[Path] = None
-        if self.cache_dir:
-            file = self.cache_dir / segment.split("/")[-1]
-        if not file or not file.exists():
-            self.retrieved_segments += 1
-
-        return jsonql.open_remote_file(url, cache=file)
+        url = "/".join([WET_URL_ROOT, segment])
+        file = self.cache_dir / segment.replace("/", "_") if self.cache_dir else None
+        
+        # Add retry logic
+        max_retries = 3
+        retry_delay = 10  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                return jsonql.open_remote_file(url, cache=file)
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise
+                logger.warning(f"Download failed (attempt {attempt + 1}/{max_retries}): {e}")
+                time.sleep(retry_delay)
 
     def __iter__(self) -> Iterator[dict]:
         n = len(self.segments)
@@ -213,27 +220,24 @@ class CCShardReader(CCSegmentsReader):
     def __init__(
         self,
         dump: str,
-        shard: int,
-        num_shards: int = -1,
-        num_segments_per_shard: int = 40,
-        min_len: int = 300,
-        cache_dir: Path = None,
+        shard: int = 0,
+        num_shards: int = 1,
+        num_segments_per_shard: int = -1,
+        min_len: int = 0,
+        cache_dir: Optional[Path] = None,
     ):
-        """Downloads a shard of Common Crawl, and yields dict.
-
-        Arguments:
-            dump: CC dump id
-            shard: id of the shard
-            num_shards: total number of shards
-            num_segments_per_shard: if set will limit the number of files by shard.
-                Useful for testing.
-        """
-        super().__init__([], min_len=min_len, cache_dir=cache_dir)
         self.dump = dump
         self.shard = shard
-        assert num_shards > 0 or num_segments_per_shard > 0
         self.num_shards = num_shards
         self.num_segments_per_shard = num_segments_per_shard
+        self.min_len = min_len
+        self.cache_dir = cache_dir
+        self._segments: Optional[List[str]] = None
+
+    def open_segment(self, segment: str) -> Iterable[str]:
+        url = "/".join([WET_URL_ROOT, segment])
+        file = self.cache_dir / segment.replace("/", "_") if self.cache_dir else None
+        return jsonql.open_remote_file(url, cache=file)
 
     @property
     def segments(self) -> Sequence[str]:
@@ -285,3 +289,4 @@ def benchmark(tmp_path: Path):
 
 if __name__ == "__main__":
     func_argparse.main(ls, dl)
+
