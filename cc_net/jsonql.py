@@ -1082,27 +1082,15 @@ class MultiFile(SimpleIO):
 _session = functools.lru_cache()(requests.Session)
 
 
-def request_get_content(url: str, n_retry: int = 3) -> bytes:
+def request_get_content(url: str) -> bytes:
     """Retrieve the binary content at url.
 
     Retry on connection errors.
     """
     t0 = time.time()
     logging.info(f"Starting download of {url}")
-    for i in range(1, n_retry + 1):
-        try:
-            r = _session().get(url)
-            r.raise_for_status()
-            break
-        except requests.exceptions.RequestException as e:
-            # Sleep and try again on error, unless it's a 404.
-            message = e.args[0] if isinstance(e.args[0], str) else ""
-            if i == n_retry or "Client Error" in message:
-                raise e
-            warnings.warn(
-                f"Swallowed error {e} while downloading {url} ({i} out of {n_retry})"
-            )
-            time.sleep(10 * 2 ** i)
+    r = _session().get(url)  # Remove timeout
+    r.raise_for_status()
     dl_time = time.time() - t0
     dl_speed = len(r.content) / dl_time / 1024
     logging.info(
@@ -1112,32 +1100,40 @@ def request_get_content(url: str, n_retry: int = 3) -> bytes:
 
 
 def open_remote_file(url: str, cache: Path = None) -> Iterable[str]:
-    """Download the files at the given url to memory and opens it as a file.
-    Assumes that the file is small, and fetch it when this function is called.
+    """Download the files at the given url and opens it as a file.
+    Uses streaming to avoid memory issues with large files.
     """
     if cache and cache.exists():
         return open_read(cache)
 
-    # TODO: open the remote file in streaming mode.
-    # The hard part is that we need to write the content on disk at the same time,
-    # to implement disk caching.
-    raw_bytes = request_get_content(url)
-    content = io.BytesIO(raw_bytes)
-    if url.endswith(".gz"):
-        f: TextIO = gzip.open(content, mode="rt")  # type: ignore
-    else:
-        f = io.TextIOWrapper(content)
-
-    if cache and not cache.exists():
-        # The file might have been created while downloading/writing.
+    # Create parent directories if needed
+    if cache:
+        cache.parent.mkdir(parents=True, exist_ok=True)
         tmp_cache = _tmp(cache)
-        tmp_cache.write_bytes(raw_bytes)
-        if not cache.exists():
-            tmp_cache.replace(cache)
+    
+    # Stream the download
+    r = _session().get(url, stream=True)
+    r.raise_for_status()
+    
+    if url.endswith(".gz"):
+        # For gzipped files, we need to download to disk first
+        if cache:
+            with open(tmp_cache, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            if not cache.exists():
+                tmp_cache.replace(cache)
+            return gzip.open(cache, 'rt')
         else:
-            tmp_cache.unlink()
-
-    return _close_when_exhausted(f)
+            # No cache, decompress in memory
+            content = io.BytesIO()
+            for chunk in r.iter_content(chunk_size=8192):
+                content.write(chunk)
+            content.seek(0)
+            return gzip.open(content, 'rt')
+    else:
+        # For uncompressed files, we can stream directly
+        return (line.decode('utf-8') for line in r.iter_lines())
 
 
 def sharded_file(file_pattern: Path, mode: str, max_size: str = "4G") -> MultiFile:
