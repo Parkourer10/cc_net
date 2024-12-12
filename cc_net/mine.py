@@ -71,32 +71,34 @@ class Config(NamedTuple):
     task_parallelism: max number of task to run in parallel
     pipeline: restricts the mining pipeline to the given steps. Order is important !
     experiments: (HACK) enable specific experiments in the code
+    timeout_hour: float = 1.0  # Default timeout in hours for jobs
     """
 
     config_name: str = "base"
-    dump: str = "2017-51"
+    dump: str = "2019-09"
     output_dir: Path = Path("data")
     mined_dir: str = "mined"
     execution: str = "auto"
-    num_shards: int = 1600
+    num_shards: int = 1000
     num_segments_per_shard: int = -1
     metadata: Optional[str] = None
     min_len: int = 300
-    hash_in_mem: int = 50
-    lang_whitelist: Sequence[str] = []
-    lang_blacklist: Sequence[str] = []
+    hash_in_mem: int = 20
+    lang_whitelist: List[str] = []
+    lang_blacklist: List[str] = []
     lang_threshold: float = 0.5
-    keep_bucket: Sequence[str] = []
+    keep_bucket: List[str] = []
     lm_dir: Path = Path("data/lm_sp")
     cutoff: Path = CUTOFF_CSV
-    lm_languages: Optional[Sequence[str]] = None
-    mine_num_processes: int = 16
+    lm_languages: Optional[List[str]] = None
+    mine_num_processes: int = 1
     target_size: str = "4G"
-    cleanup_after_regroup: bool = True
+    cleanup_after_regroup: bool = False
     task_parallelism: int = -1
-    pipeline: Sequence[str] = DEFAULT_PIPELINE
-    experiments: Sequence[str] = []
+    pipeline: List[str] = DEFAULT_PIPELINE
+    experiments: List[str] = []
     cache_dir: Optional[Path] = None
+    timeout_hour: float = 1.0
 
     def get_executor(
         self, name: str, timeout_hour: int = 1, mem_gb: int = 1, cpus: int = 1
@@ -195,14 +197,15 @@ TEST_CONFIG = BASE_CONFIG._replace(
     dump="2019-09",
     output_dir=Path("test_data"),
     execution="local",
-    num_shards=4,
+    num_shards=2,
     num_segments_per_shard=1,
     hash_in_mem=2,
-    mine_num_processes=2,
+    mine_num_processes=1,
     lang_whitelist=["de", "it", "fr"],
     target_size="32M",
     cleanup_after_regroup=False,
     cache_dir=Path("test_data/wet_cache"),
+    task_parallelism=4
 )
 
 PREDEF_CONFIGS = {
@@ -248,7 +251,6 @@ def _transpose(iterable: Sequence[Tuple[Any, ...]], n=-1) -> Tuple[List, ...]:
 
 def hashes(conf: Config) -> List[Path]:
     """Computes hashes for each shard."""
-
     hashes_dir = conf.output_dir / "hashes" / conf.dump
     outputs = [hashes_dir / f"{shard:04d}.bin" for shard in range(conf.num_shards)]
     missing_outputs = [(shard, o) for shard, o in enumerate(outputs) if not o.exists()]
@@ -257,25 +259,36 @@ def hashes(conf: Config) -> List[Path]:
         return outputs
 
     hashes_dir.mkdir(parents=True, exist_ok=True)
-    # With FlatHashSet we need ~2Gb of RAM / shard, but we need to account for
-    # overhead due to how the dynamic allocation works.
-    ex = conf.get_executor(f"hashes_{conf.dump}", mem_gb=4, timeout_hour=6, cpus=2)
+    
+    # Increase resources for hash computation
+    ex = conf.get_executor(
+        f"hashes_{conf.dump}",
+        timeout_hour=8,  # Significantly increase timeout
+        mem_gb=8,  # More memory
+        cpus=4
+    )
     ex(_hashes_shard, repeat(conf), *_transpose(missing_outputs))
 
-    # Wait a bit so that files appears on the disk.
-    time.sleep(20)
+    # Increase wait time for files to appear
+    time.sleep(30)
     assert all(o.exists() for o in outputs)
     return outputs
 
 
 def _hashes_shard(conf: Config, shard: int, output: Path):
+    """Download and compute hashes for a CC dump shard."""
     tmp_output = tmp(output)
-    jsonql.run_pipes(
-        dedup.HashesCollector(field="raw_content", output=tmp_output),
-        inputs=conf.get_cc_shard(shard),
-    )
-    finalize(tmp_output, output)
-    return f"Hashed {output}"
+    try:
+        jsonql.run_pipes(
+            dedup.HashesCollector(field="raw_content", output=tmp_output),
+            inputs=conf.get_cc_shard(shard),
+        )
+        finalize(tmp_output, output)
+        return f"Hashed {output}"
+    except Exception as e:
+        if tmp_output.exists():
+            tmp_output.unlink()
+        raise e
 
 
 HASHES_IN_MEM = [0, 1, 2, 5, 10, 20, 50, 100, 200, 400]
