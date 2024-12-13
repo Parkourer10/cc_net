@@ -7,11 +7,30 @@
 import argparse
 import collections
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple, List
 
 import fasttext  # type: ignore
+import numpy as np
 
 from cc_net import jsonql
+
+
+class FastTextWrapper:
+    """Wrapper around FastText to handle NumPy 2.0 compatibility issues"""
+    def __init__(self, model_path: str):
+        self._model = fasttext.load_model(model_path)
+    
+    def predict(self, text: str, k: int = 1) -> Tuple[List[str], np.ndarray]:
+        # Call the internal predict method to avoid the numpy array creation
+        labels, probs = self._model.predict(text, k=k)
+        # Process labels to remove __label__ prefix
+        labels = [l.replace("__label__", "") for l in labels]
+        # Create numpy array safely
+        return labels, np.asarray(probs)
+
+    @property
+    def model(self):
+        return self._model
 
 
 def get_args():
@@ -28,23 +47,23 @@ def get_args():
     return vars(parser.parse_args())
 
 
-def predict(model, text: str, k: int = 1):
-    labels, scores = model.predict(text, k=k)
-    labels = [l.replace("__label__", "") for l in labels]
-    return labels, scores
-
-
-def avg_predict(model, text):
+def avg_predict(model: FastTextWrapper, text: str):
     # Overall gives the same results than predict(model, text.replace("\n", ""))
     text = text.split("\n")
     text_len = sum(len(line) for line in text)
     if text_len == 0:
         return None, 0
-    scores = [predict(model, line) for line in text]
+    
     scores_by_label: Dict[str, float] = collections.defaultdict(float)
-    for (label, score), line in zip(scores, text):
-        scores_by_label[label] += score * len(line)
+    for line in text:
+        if not line:
+            continue
+        labels, scores = model.predict(line)
+        scores_by_label[labels[0]] += scores[0] * len(line)
 
+    if not scores_by_label:
+        return None, 0
+        
     label, score = max(scores_by_label.items(), key=lambda kv: kv[1])
     return label, score / text_len
 
@@ -61,25 +80,27 @@ class Classifier(jsonql.Transformer):
         rounding: int = 2,
     ):
         super().__init__()
-        self.model = model
-        assert model.exists(), f"Model {model} doesn't exist."
+        self.model_path = model
         self.field = field
         self.out_field = out_field
         self.threshold = threshold
         self.top = top
         self.language = language
         self.rounding = rounding
-        # Fasttext model is a C object and can't be pickled
-        self.fasttext_model: fasttext._FastText = None
-        self.n_doc, self.n_accepted, self.n_ignored, self.n_disagreement = 0, 0, 0, 0
         self.cnt: Dict[str, int] = {}
+        self.n_doc = 0
+        self.n_accepted = 0
+        self.n_ignored = 0
+        self.n_disagreement = 0
+        
+        print("Loading", model)
+        self.fasttext_model = FastTextWrapper(str(model))
 
-    def _prepare(self):
-        self.log(f"Loading {self.model}")
-        self.fasttext_model = fasttext.load_model(str(self.model))
+    def __repr__(self):
+        return f"Classifier({self.model_path})"
 
-    def predict(self, text):
-        return predict(self.fasttext_model, text.replace("\n", ""), k=self.top)
+    def predict(self, text: str):
+        return self.fasttext_model.predict(text.replace("\n", ""), k=self.top)
 
     def do(self, doc: dict) -> Optional[dict]:
         text = doc.get(self.field, None)
@@ -130,9 +151,6 @@ class Classifier(jsonql.Transformer):
         if disagreement:
             summ.append(f"{out_field} disagreement is at {disagreement:.1%}.")
         return summ
-
-    def __repr__(self):
-        return f"Classifier({self.model})"
 
 
 def classify_and_split(file, output, pattern, **kwargs):
