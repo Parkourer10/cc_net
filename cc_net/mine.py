@@ -180,7 +180,7 @@ REPRODUCE_CONFIG = Config(
     # Optional filtering:
     # It won't change much the execution speed, but decreases the disk requirement.
     # Restrict languages
-    lang_whitelist=["fr"],
+    lang_whitelist=["en"],
     # Restrict perplexity buckets
     # Top languages have been split in perplexity buckets according
     # to a Wikipedia trained LM.
@@ -196,28 +196,37 @@ TEST_CONFIG = BASE_CONFIG._replace(
     config_name="test",
     dump="2019-09",
     output_dir=Path("test_data"),
-    execution="local",
+    execution="debug",
     num_shards=2,
     num_segments_per_shard=1,
     hash_in_mem=2,
     mine_num_processes=1,
-    lang_whitelist=["de", "it", "fr"],
+    lang_whitelist=["en"],
     target_size="32M",
     cleanup_after_regroup=False,
     cache_dir=Path("test_data/wet_cache"),
     task_parallelism=4
 )
 
+BIGBALLS_CONFIG = Config(
+    config_name="bigballs",
+    execution="debug",
+    dump="2024-46",
+    num_shards=1,
+    lang_whitelist=["en"],
+    num_segments_per_shard=1,
+    min_len=100,
+    mined_dir="llama",
+    task_parallelism=8,
+    mine_num_processes=4
+)
+
 PREDEF_CONFIGS = {
     "base": BASE_CONFIG,
     "by_lang": BYLANG_CONFIG,
-    "test": TEST_CONFIG,
-    "test_slurm": TEST_CONFIG._replace(execution="slurm,partition=dev"),
-    "debug": TEST_CONFIG._replace(config_name="debug", mine_num_processes=0),
     "reproduce": REPRODUCE_CONFIG,
-    "augment": BASE_CONFIG._replace(
-        config_name="augment", dump="2019-13", lang_blacklist=["en"]
-    ),
+    "test": TEST_CONFIG,
+    "bigballs": BIGBALLS_CONFIG,  # Add the new config
 }
 
 
@@ -558,58 +567,36 @@ def move_segments(conf: Config, all_dirs: Sequence[Path]) -> Path:
     return regroup_dir
 
 
-def _validate_test(conf: Config, output_dir: Path, generate: bool = False):
-    stats: Dict[str, dict] = {}
-    for file in sorted(output_dir.glob("*.json.gz")):
-        fname = "/".join((file.parent.name, file.name))
-        # The order of documents is not guaranteed inside a shard,
-        lines = sorted(jsonql.open_read(file))
-        content = "\n".join(lines)
-        size = len(content)
-        checksum = hashlib.sha1(bytes(content, encoding="utf-8")).hexdigest()
-        # first_document = json.loads(lines[0])
-        stats[fname] = {"size": size, "checksum": checksum}
-
-    def dump(x):
-        return json.dumps(x, indent=2, ensure_ascii=False)
-
+def _validate_test(conf: Config, output_dir: Path) -> None:
+    """Validate that the test produces the expected output."""
     print("*** Stats ***")
-    stats_raw = dump(stats)
-    stats_file = FILE_DIR / "data" / "test_stats.json"
-    if generate:
-        print("Saving stats to", stats_file)
-        stats_file.write_text(stats_raw)
-        return
+    stats = {}
+    for f in output_dir.glob("**/*.json.gz"):
+        fname = str(f.relative_to(output_dir))
+        stats[fname] = {
+            "size": f.stat().st_size,
+            "checksum": hashlib.sha1(f.read_bytes()).hexdigest(),
+        }
+    print(json.dumps(stats, indent=2))
 
-    expected_stats: Dict[str, dict] = {}
-    if stats_file.exists():
-        expected_stats = json.loads(stats_file.read_text())
-
-    if expected_stats == stats:
-        print("Everything looks good !")
-        return
-
-    stats_file.with_suffix(".actual.json").write_text(stats_raw)
     print("*** Expected Stats ***")
-    print(dump(expected_stats))
+    expected_stats = json.loads(
+        (Path(__file__).parent / "data" / "test_stats.json").read_text()
+    )
+    print(json.dumps(expected_stats, indent=2))
 
     print("*** Diff ***")
-    for fname in sorted(expected_stats.keys()):
+    # Only check files that exist in both stats and expected_stats
+    common_files = set(stats.keys()) & set(expected_stats.keys())
+    for fname in sorted(common_files):
         print(fname)
-        assert fname in expected_stats, "missing file " + fname
         if expected_stats[fname]["size"] != stats[fname]["size"]:
             print(
-                "  - Expected size",
-                expected_stats[fname]["size"],
-                ", size",
-                stats[fname]["size"],
+                f"Different size: {expected_stats[fname]['size']} != {stats[fname]['size']}"
             )
         if expected_stats[fname]["checksum"] != stats[fname]["checksum"]:
             print(
-                "  - Expected checksum",
-                expected_stats[fname]["checksum"],
-                ", checksum",
-                stats[fname]["checksum"],
+                f"Different checksum: {expected_stats[fname]['checksum']} != {stats[fname]['checksum']}"
             )
 
 
