@@ -77,42 +77,58 @@ def get_executor(
     return functools.partial(map_array_and_wait, ex)
 
 
-def map_array_and_wait(
-    ex: submitit.AutoExecutor, function: Callable[..., str], *args: Iterable
-):
+def map_array_and_wait(ex: submitit.AutoExecutor, function: Callable[..., str], *args: Iterable) -> None:
+    """Submit an array of jobs and wait for completion."""
+
+    # Convert args to list to get length
+    args = [list(a) for a in args]
+    if not args or not args[0]:
+        return
+    total = len(args[0])
     f_name = function.__name__
 
-    assert len(args) > 0, f"No arguments passed to {f_name}"
-    approx_length = _approx_length(*args)
+    # Wrap function to add retry on timeout
+    function = SubmititRetryOnTimeout(function)
 
-    print(f"Submitting {f_name} in a job array ({approx_length} jobs)")
-    jobs = ex.map_array(function, *args)
-    if not jobs:
-        return
+    # Submit jobs
+    jobs = []
+    enqueued = 0
     failed_jobs = []
     done = 0
-    total = len(jobs)
-    job_array_id = jobs[0].job_id.split("_")[0]
-    print(f"Started {f_name} in job array {job_array_id} ({len(jobs)} jobs).")
-    for job in submitit.helpers.as_completed(jobs):
+
+    while enqueued < total:
+        # Submit a batch of jobs
+        n_jobs = min(ex._submitit_job_resources.array_parallelism, total - enqueued)
+        job_args = [a[enqueued : enqueued + n_jobs] for a in args]
+        with ex.batch():
+            jobs.extend(ex.submit(function, *t) for t in zip(*job_args))
+        enqueued += n_jobs
+
+        # Process finished jobs
+        running_jobs = [j for j in jobs if not j.done()]
+        for job in jobs:
+            if not job.done():
+                continue
+            jobs.remove(job)
+            done += 1
+            try:
+                print(f"Finished job {job.job_id} ({done} / {total}).", job.result())
+            except Exception as e:
+                print(f"Failed job {job.job_id} ({done} / {total}):", e)
+                failed_jobs.append(job)
+                raise
+
+    # Wait for remaining jobs
+    while jobs:
+        job = get_next_job(jobs)
+        jobs.remove(job)
         done += 1
-        e = job.exception()
-        if not e:
+        try:
             print(f"Finished job {job.job_id} ({done} / {total}).", job.result())
-            continue
-
-        print(f"Failed job {job.job_id} ({done} / {total}):", e)
-        failed_jobs.append(job)
-
-    if failed_jobs:
-        n_failures = 10
-        message = f"{len(failed_jobs)} / {done} jobs failed while running {f_name}"
-        print(message)
-        for job in failed_jobs[:n_failures]:
-            print(f"Failed {job.job_id} -> {job.paths.stderr}")
-        if len(failed_jobs) > n_failures:
-            print(f"... ({len(failed_jobs) - n_failures} failed job skipped)")
-        raise Exception(message)
+        except Exception as e:
+            print(f"Failed job {job.job_id} ({done} / {total}):", e)
+            failed_jobs.append(job)
+            raise
 
 
 def debug_executor(function: Callable[..., Optional[str]], *args: Iterable) -> None:
