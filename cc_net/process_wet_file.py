@@ -12,7 +12,7 @@ import tempfile
 import time
 import urllib.request
 from pathlib import Path
-from typing import ContextManager, Iterable, Iterator, List, Optional, Sequence
+from typing import ContextManager, Iterable, Iterator, List, Optional, Sequence, Dict
 from urllib.parse import urlparse
 
 import func_argparse
@@ -54,49 +54,36 @@ def ls():
         print(dump, "->", cc_wet_paths_url(dump))
 
 
-def parse_doc(headers: List[str], doc: List[str]) -> Optional[dict]:
-    """Headers format is:
-    WARC/1.0
-    WARC-Type: conversion
-    WARC-Target-URI: [url]
-    WARC-Date: [crawldate: 2019-02-15T19:15:59Z]
-    WARC-Record-ID: <urn:uuid:8865156e-d5f1-4734-9c68-4b46eaf2bb7e>
-    WARC-Refers-To: <urn:uuid:340152e2-65cf-4143-b522-8ce4e2d069d7>
-    WARC-Block-Digest: sha1:S3DTWCONT2L6ORTGCY2KXEZ37LNBB7V2
-    Content-Type: text/plain
-    Content-Length: 7743
-    """
-    if not headers or not doc:
-        return None
-
+def parse_doc(headers: List[str], doc: List[str]) -> Optional[Dict[str, str]]:
+    """Parse a WARC document into a dict with url, text, date, title, and length."""
     try:
-        warc_type = headers[1].split()[1]
-        if warc_type != "conversion":
+        # Try to find Content-Length in headers
+        length = None
+        for header in headers:
+            if header.startswith('Content-Length:'):
+                length = int(header.split()[1])
+                break
+        
+        if length is None:
             return None
+
         url = headers[2].split()[1]
         date = headers[3].split()[1]
-        digest = headers[6].split()[1]
-        length = int(headers[8].split()[1])
+        title = doc[0] if doc else ""
+        content = doc[1:] if doc else []  # Skip title line
+
+        return {
+            "url": url,
+            "raw_content": "\n".join(content),
+            "title": title,
+            "length": length,
+            "date_download": date,
+            "nlines": len(content),
+            "source_domain": urlparse(url).netloc,
+        }
     except Exception as e:
-        logger.warning("Can't parse header:", e, headers, doc)
+        logger.warning(f"Can't parse header: {str(e)}")
         return None
-
-    # Docs are separated by two empty lines.
-    last = None
-    if not doc[-1] and not doc[-2]:
-        last = -2
-    title, doc = doc[0], doc[1:last]
-
-    return {
-        "url": url,
-        "date_download": date,
-        "digest": digest,
-        "length": length,
-        "nlines": len(doc),
-        "source_domain": urlparse(url).netloc,
-        "title": title,
-        "raw_content": "\n".join(doc),
-    }
 
 
 def group_by_docs(warc_lines: Iterable[str]) -> Iterable[dict]:
