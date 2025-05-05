@@ -1,5 +1,5 @@
 # cc_net
-
+### NOTE: I made this fork work without an aws account with limited functionality on debug mode.
 Tools to download and clean Common Crawl as introduced in our paper [CCNet](https://arxiv.org/abs/1911.00359).
 
 If you found these resources useful, please consider citing:
